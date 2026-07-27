@@ -10,10 +10,16 @@ name: OnePlus Ace5 Pro 全功能内核 (SukiSU + DroidSpaces)
 #   KMI       android15 / 6.6
 #   Root      SukiSU Ultra
 #
-# 默认全功能开启：SUSFS / KPM / lz4kd / BBR / 代理优化 /
-#                Unicode 零宽绕过 / DroidSpaces 容器支持 / 用户命名空间
+# 默认值对齐设备上已验证可正常开机的配置组合（6.6.89-android15-4-o）：
+#   开：KPM / BBG / BBR / 代理优化 / DroidSpaces 全套（含 DEVTMPFS）/ USER_NS
+#   关：SUSFS —— 已验证组合里不含 SUSFS，且它是 SurfaceFlinger 崩溃重启
+#       （界面反复闪一下）的头号嫌疑。若关掉后仍闪，下一个查 lz4kd：
+#       已验证内核只有基础 CONFIG_CRYPTO_LZ4，没有 lz4kd / lz4k_oplus。
 #
-# 不含 BBG：BBG 与 KPM 都会改写 CONFIG_LSM，二者互斥，此工作流固定选 KPM。
+# 两处经设备实测、与 ABK 主仓库判断不同的结论：
+#   1. BBG 与 KPM 可共存 —— 设备上 CONFIG_KPM=y 与 CONFIG_BBG=y 同时生效，
+#      主仓库那条「KPM 开就跳过 BBG」是保守写法，不是硬约束。
+#   2. DEVTMPFS 无害 —— 已验证内核 CONFIG_DEVTMPFS=y 且显示完全正常。
 
 permissions:
   contents: read
@@ -23,12 +29,17 @@ on:
   workflow_dispatch:
     inputs:
       enable_susfs:
-        description: "SUSFS 挂载隐藏"
+        description: "SUSFS 挂载隐藏（已验证可用的内核里没有它，闪屏头号嫌疑，默认关）"
+        required: false
+        type: boolean
+        default: false
+      use_kpm:
+        description: "KPM (KernelPatch 模块)"
         required: false
         type: boolean
         default: true
-      use_kpm:
-        description: "KPM (KernelPatch 模块)"
+      use_bbg:
+        description: "BBG 基带防护（与 KPM 可共存，设备实测两者同时生效）"
         required: false
         type: boolean
         default: true
@@ -62,15 +73,28 @@ on:
         required: false
         type: boolean
         default: true
+      enable_devtmpfs:
+        description: "CONFIG_DEVTMPFS（DroidSpaces 需要；设备已验证内核开启此项且显示正常）"
+        required: false
+        type: boolean
+        default: true
       kabi_slot:
-        description: "DroidSpaces kABI 槽位，与 SUSFS 冲突时换一个 (678/123/345)"
+        description: "DroidSpaces kABI 槽位（OPlus 已占用 1/2/3，只能用 4~8 区间）"
         required: false
         type: choice
         options:
           - "678"
-          - "123"
-          - "345"
+          - "567"
+          - "456"
         default: "678"
+      ksu_hook_mode:
+        description: "SukiSU hook 方式（SUSFS 关闭时生效）。tracepoint 不改源码，已验证内核用的就是它"
+        required: false
+        type: choice
+        options:
+          - tracepoint
+          - manual
+        default: tracepoint
 
 env:
   CPU: sm8750
@@ -213,13 +237,16 @@ jobs:
     env:
       ENABLE_SUSFS: ${{ inputs.enable_susfs }}
       USE_KPM: ${{ inputs.use_kpm }}
+      USE_BBG: ${{ inputs.use_bbg }}
       USE_LZ4KD: ${{ inputs.use_lz4kd }}
       USE_BBR: ${{ inputs.use_bbr }}
       USE_PROXY_OPTIMIZATION: ${{ inputs.use_proxy_optimization }}
       USE_UNICODE_BYPASS: ${{ inputs.use_unicode_bypass }}
       ENABLE_DROIDSPACES: ${{ inputs.enable_droidspaces }}
       ENABLE_USER_NS: ${{ inputs.enable_user_ns }}
+      ENABLE_DEVTMPFS: ${{ inputs.enable_devtmpfs }}
       KABI_SLOT: ${{ inputs.kabi_slot }}
+      KSU_HOOK_MODE: ${{ inputs.ksu_hook_mode }}
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
       CCACHE_NOHASHDIR: "true"
       CCACHE_HARDLINK: "true"
@@ -253,14 +280,16 @@ jobs:
           echo "内核版本        : $KERNEL_VERSION"
           echo "KSU 变体        : $KSU_VARIANT"
           echo "SUSFS 状态      : $ENABLE_SUSFS"
+          echo "KSU hook 方式   : $KSU_HOOK_MODE（SUSFS 开启时由 SUSFS 补丁自带 hook）"
           echo "KPM 功能        : $USE_KPM"
-          echo "BBG 补丁        : 不启用（与 KPM 互斥）"
+          echo "BBG 补丁        : $USE_BBG"
           echo "ZRAM lz4kd      : $USE_LZ4KD"
           echo "BBR             : $USE_BBR"
           echo "代理优化        : $USE_PROXY_OPTIMIZATION"
           echo "Unicode 绕过    : $USE_UNICODE_BYPASS"
           echo "DroidSpaces     : $ENABLE_DROIDSPACES (kABI 槽位 $KABI_SLOT)"
           echo "用户命名空间    : $ENABLE_USER_NS"
+          echo "DEVTMPFS        : $ENABLE_DEVTMPFS"
           echo "========================================"
 
       - name: 最大化构建空间
@@ -367,6 +396,13 @@ jobs:
               --depth=1
           fi
 
+          if [ "$USE_BBG" = "true" ]; then
+            cd "$COMMON_ROOT"
+            curl -fsSL https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh -o setup-bbg.sh
+            bash setup-bbg.sh
+            cd "$WORKSPACE"
+          fi
+
           cp "$WORKSPACE/kernel_patches/zram_patches/001-lz4.patch" "$COMMON_ROOT/"
           cp "$WORKSPACE/kernel_patches/zram_patches/lz4armv8.S" "$COMMON_ROOT/lib/"
           cp "$WORKSPACE/kernel_patches/zram_patches/002-zstd.patch" "$COMMON_ROOT/"
@@ -385,12 +421,14 @@ jobs:
             cp "$WORKSPACE/susfs4oki/kernel_patches/50_add_susfs_in_gki-${ANDROID_VERSION}-${KERNEL_VERSION}.patch" "$COMMON_ROOT/" || true
             cp "$WORKSPACE"/susfs4oki/kernel_patches/fs/* "$COMMON_ROOT/fs/" || true
             cp "$WORKSPACE"/susfs4oki/kernel_patches/include/linux/* "$COMMON_ROOT/include/linux/" || true
-          else
+          elif [ "$KSU_HOOK_MODE" = "manual" ]; then
             if [ -f "$WORKSPACE/kernel_patches/sukisu/scope_min_manual_hooks_v1.9.patch" ]; then
               cp "$WORKSPACE/kernel_patches/sukisu/scope_min_manual_hooks_v1.9.patch" "$COMMON_ROOT/"
             else
               cp "$WORKSPACE/kernel_patches/sukisu/scope_min_manual_hooks_v1.6.patch" "$COMMON_ROOT/"
             fi
+          else
+            echo "hook 方式为 tracepoint，跳过 manual hook 源码补丁。"
           fi
 
           if [ "$USE_UNICODE_BYPASS" = "true" ]; then
@@ -564,13 +602,19 @@ jobs:
               raise SystemExit(0)
 
           text = path.read_text()
-          marker = "builtin SUSFS ksu_sulog_capture() expects argv_user as a pointer"
+          marker = "ABK: ksu_sulog_capture() argv signature differs by CONFIG_KSU_SUSFS"
           new = "\n".join([
-              "    /* ABK: builtin SUSFS ksu_sulog_capture() expects argv_user as a pointer. */",
+              "    /* ABK: ksu_sulog_capture() argv signature differs by CONFIG_KSU_SUSFS.",
+              "       Defined   -> struct user_arg_ptr *argv_user  (pointer)",
+              "       Undefined -> const struct user_arg_ptr argv  (by value)",
+              "       ksu_sulog_capture_grant_root() sits outside that #ifdef and upstream",
+              "       passes USER_ARG_NULL (a pointer) unconditionally, which fails to build",
+              "       whenever SUSFS is off. user_arg_null_ptr() returns the address of a",
+              "       static zeroed object (never NULL), so dereferencing is safe here. */",
               "#ifdef CONFIG_KSU_SUSFS",
               "    pending = ksu_sulog_capture(KSU_SULOG_EVENT_IOCTL_GRANT_ROOT, NULL, NULL, gfp);",
               "#else",
-              "    pending = ksu_sulog_capture(KSU_SULOG_EVENT_IOCTL_GRANT_ROOT, NULL, USER_ARG_NULL, gfp);",
+              "    pending = ksu_sulog_capture(KSU_SULOG_EVENT_IOCTL_GRANT_ROOT, NULL, *USER_ARG_NULL, gfp);",
               "#endif",
           ])
 
@@ -592,12 +636,15 @@ jobs:
               print(f"no change for {path}")
 
           final_text = path.read_text()
-          incompatible = re.search(
-              r"pending = ksu_sulog_capture\(KSU_SULOG_EVENT_IOCTL_GRANT_ROOT, NULL, &?USER_ARG_NULL, gfp\);",
-              final_text,
-          )
-          if incompatible and marker not in final_text:
-              raise SystemExit(f"{path} still contains incompatible ksu_sulog_capture grant_root argv call")
+          if marker not in final_text:
+              raise SystemExit(f"{path}: sulog grant_root argv compat block was not applied")
+          if "*USER_ARG_NULL, gfp);" not in final_text:
+              raise SystemExit(f"{path}: non-SUSFS branch must pass *USER_ARG_NULL by value")
+          bare = re.search(r"(?<![*&])\bUSER_ARG_NULL, gfp\);", final_text)
+          if bare:
+              raise SystemExit(
+                  f"{path}: bare USER_ARG_NULL (a pointer) is still passed to a by-value argv parameter"
+              )
           PY
 
       - name: 注入 SukiSU KPM Kconfig
@@ -721,8 +768,14 @@ jobs:
               return 0
             fi
 
-            grep -qF "ANDROID_KABI_RESERVE(${SLOT_A});" "$sched" \
-              || fail "task_struct 中不存在 ANDROID_KABI_RESERVE(${SLOT_A})，请换一个 kABI 槽位"
+            # 三个槽位必须都还是 RESERVE。OPlus 在 sm8750 上已经用 ANDROID_KABI_USE
+            # 占了 1（恒定）以及 CONFIG_SLIM_SCHED 下的 2/3，抢占会直接破坏
+            # sched_prop / scx / dmabuf_info，表现为显示异常或随机崩溃。
+            local slot
+            for slot in "$SLOT_A" "$SLOT_B" "$SLOT_C"; do
+              grep -qF "ANDROID_KABI_RESERVE(${slot});" "$sched" \
+                || fail "槽位 ${slot} 不是空闲的 ANDROID_KABI_RESERVE（可能已被 OPlus 的 ANDROID_KABI_USE 占用），请改用 4~8 区间的槽位"
+            done
 
             # 注释掉原生字段，避免与借槽后的定义重复
             perl -0pi -e 's/#ifdef CONFIG_SYSVIPC\n\tstruct sysv_sem\s+sysvsem;\n\tstruct sysv_shm\s+sysvshm;\n#endif/#ifdef CONFIG_SYSVIPC\n\t\/\/ struct sysv_sem\t\t\tsysvsem;\n\t\/\/ struct sysv_shm\t\t\tsysvshm;\n#endif/s' "$sched"
@@ -784,10 +837,16 @@ jobs:
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
           CONFIG_KSU_SUSFS_SUS_MAP=y
           EOF
-          else
+          elif [ "$KSU_HOOK_MODE" = "manual" ]; then
             cat >> "$DEFCONFIG_PATH" <<'EOF'
           CONFIG_KSU_SUSFS=n
           CONFIG_KSU_MANUAL_HOOK=y
+          EOF
+          else
+            # tracepoint hook 不改内核源码，设备上已验证可正常开机的内核用的就是这种
+            cat >> "$DEFCONFIG_PATH" <<'EOF'
+          CONFIG_KSU_SUSFS=n
+          CONFIG_KSU_TRACEPOINT_HOOK=y
           EOF
           fi
 
@@ -823,6 +882,16 @@ jobs:
           elif [ "$kpm_config_supported" = "true" ]; then
             echo "# CONFIG_KPM is not set" >> "$DEFCONFIG_PATH"
             echo "检测到 KPM Kconfig，已显式关闭 CONFIG_KPM。"
+          fi
+
+          # LSM 顺序取自设备上已验证可正常开机的内核：baseband_guard 紧随 selinux，
+          # 且不含 integrity。与 ABK 主仓库那条（baseband_guard 置于末尾、含
+          # integrity）不同，这里以实机验证过的为准。
+          if [ "$USE_BBG" = "true" ]; then
+            cat >> "$DEFCONFIG_PATH" <<'EOF'
+          CONFIG_BBG=y
+          CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,baseband_guard,smack,tomoyo,apparmor,bpf"
+          EOF
           fi
 
           if [ "$USE_BBR" = "true" ]; then
@@ -877,7 +946,7 @@ jobs:
           sed -i 's/check_defconfig//' "$COMMON_ROOT/build.config.gki" || true
 
       - name: 写入 DroidSpaces 内核配置
-        if: ${{ inputs.enable_droidspaces || inputs.enable_user_ns }}
+        if: ${{ inputs.enable_droidspaces || inputs.enable_user_ns || inputs.enable_devtmpfs }}
         shell: bash
         working-directory: oneplus_workspace/kernel_workspace/kernel_platform/common
         run: |
@@ -937,7 +1006,14 @@ jobs:
             enable_required_config CONFIG_POSIX_MQUEUE
             enable_required_config CONFIG_IPC_NS
             enable_required_config CONFIG_PID_NS
-            enable_required_config CONFIG_DEVTMPFS
+
+            # GKI 默认不开 DEVTMPFS（Android 用 tmpfs + ueventd 管理 /dev），但设备上
+            # 已验证可用的内核确实是 CONFIG_DEVTMPFS=y 且显示正常，故默认开启。
+            if [ "$ENABLE_DEVTMPFS" = "true" ]; then
+              enable_required_config CONFIG_DEVTMPFS
+            else
+              echo "  已跳过: CONFIG_DEVTMPFS（按输入项要求关闭）"
+            fi
 
             echo "--- 网络 / NAT ---"
             enable_config_if_defined CONFIG_NETFILTER_XT_MATCH_ADDRTYPE
@@ -992,7 +1068,7 @@ jobs:
           ccache -s
 
       - name: 校验 DroidSpaces 配置已生效
-        if: ${{ inputs.enable_droidspaces || inputs.enable_user_ns }}
+        if: ${{ inputs.enable_droidspaces || inputs.enable_user_ns || inputs.enable_devtmpfs }}
         shell: bash
         working-directory: oneplus_workspace/kernel_workspace/kernel_platform/common
         run: |
@@ -1015,7 +1091,9 @@ jobs:
             check CONFIG_POSIX_MQUEUE
             check CONFIG_IPC_NS
             check CONFIG_PID_NS
-            check CONFIG_DEVTMPFS
+            if [ "$ENABLE_DEVTMPFS" = "true" ]; then
+              check CONFIG_DEVTMPFS
+            fi
           fi
           if [ "$ENABLE_USER_NS" = "true" ]; then
             check CONFIG_USER_NS
